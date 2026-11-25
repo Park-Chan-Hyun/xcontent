@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>벽바둑</title>
+<style>
+  :root {
+    --cell: min(11vw, 56px);
+    --gap: calc(var(--cell) * 0.2);
+    --red: #e5484d;
+    --blue: #3e63dd;
+    --bg: #f4f1ea;
+    --board: #e8dcc2;
+    --line: #6b5b3e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: system-ui, -apple-system, "Apple SD Gothic Neo", sans-serif;
+    background: var(--bg); color: #222; display: flex; flex-direction: column;
+    align-items: center; min-height: 100vh; padding: 16px 8px 40px;
+    -webkit-tap-highlight-color: transparent; user-select: none;
+  }
+  h1 { margin: 4px 0 8px; font-size: 22px; }
+  .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: center; margin-bottom: 10px; }
+  .score { display: flex; gap: 12px; font-weight: 700; font-size: 18px; }
+  .score span { padding: 4px 12px; border-radius: 999px; color: #fff; }
+  .score .r { background: var(--red); } .score .b { background: var(--blue); }
+  .score .active { outline: 3px solid #222; outline-offset: 2px; }
+  #status { min-height: 1.5em; margin: 6px 0 12px; font-size: 15px; text-align: center; }
+  button, select {
+    font: inherit; font-size: 14px; padding: 6px 12px; border-radius: 8px;
+    border: 1px solid #aaa; background: #fff; cursor: pointer;
+  }
+  #board {
+    display: grid; background: var(--board); padding: 0; border-radius: 6px;
+    box-shadow: 0 4px 18px rgba(0,0,0,.15);
+  }
+  .post { background: var(--line); }
+  .cell { position: relative; display: flex; align-items: center; justify-content: center; transition: background .15s; }
+  .cell.own-r { background: rgba(229,72,77,.22); }
+  .cell.own-b { background: rgba(62,99,221,.32); }
+  .cell.reach { cursor: pointer; }
+  .cell.reach::after {
+    content: ""; width: 28%; height: 28%; border-radius: 50%; background: rgba(0,0,0,.28);
+  }
+  .piece {
+    width: 72%; height: 72%; border-radius: 50%; box-shadow: inset 0 -3px 0 rgba(0,0,0,.25);
+    transition: transform .1s;
+  }
+  .piece.r { background: var(--red); } .piece.b { background: var(--blue); }
+  .piece.selectable { cursor: pointer; animation: pulse 1.2s infinite; }
+  .piece.selected { transform: scale(1.12); outline: 3px solid #222; outline-offset: 2px; }
+  .piece.ghost { opacity: .45; }
+  @keyframes pulse { 50% { transform: scale(.92); } }
+  .slot { background: transparent; }
+  .slot.wall-r { background: var(--red); }
+  .slot.wall-b { background: var(--blue); }
+  .slot.edge { background: var(--line); }
+  .slot.can { cursor: pointer; background: rgba(0,0,0,.18); animation: blink 1s infinite; }
+  .slot.can:hover { background: rgba(0,0,0,.5); }
+  .slot.last { box-shadow: 0 0 0 2px #ffd400; }
+  @keyframes blink { 50% { background: rgba(0,0,0,.4); } }
+  details { max-width: 520px; margin-top: 18px; font-size: 14px; line-height: 1.6; background: #fff; padding: 10px 14px; border-radius: 8px; }
+  summary { font-weight: 700; cursor: pointer; }
+</style>
+</head>
+<body>
+<h1>벽바둑</h1>
+<div class="bar">
+  <div class="score"><span class="r" id="sr">빨강 0</span><span class="b" id="sb">파랑 0</span></div>
+</div>
+<div class="bar">
+  <select id="mode">
+    <option value="pvp">2인 대전</option>
+    <option value="ai-b">vs AI (AI가 파랑)</option>
+    <option value="ai-r">vs AI (AI가 빨강)</option>
+  </select>
+  <button id="undo">무르기</button>
+  <button id="reset">새 게임</button>
+</div>
+<div id="status"></div>
+<div id="board"></div>
+
+<details>
+  <summary>규칙</summary>
+  <ul>
+    <li>7×7 판, 빨강·파랑이 각각 말 4개를 사용합니다.</li>
+    <li><b>배치 단계:</b> 각자 말 2개가 미리 놓여 있고, 파랑 → 빨강 → 빨강 → 파랑 순서로 나머지 말을 빈 칸에 놓습니다.</li>
+    <li><b>턴:</b> 내 말 하나를 골라 상하좌우로 0~2칸 이동한 뒤(벽·말은 통과 불가), 그 말이 있는 칸의 네 변 중 빈 곳 하나에 <b>반드시 벽</b>을 세웁니다.</li>
+    <li>벽으로 나뉜 각 구역에 한 사람의 말만 남으면 그 구역은 그 사람의 영역이 됩니다.</li>
+    <li>모든 구역이 한 사람 소유(또는 빈 구역)로 정리되면 게임 종료. <b>영역 칸 수가 많은 쪽이 승리</b>합니다.</li>
+    <li>벽을 세울 수 있는 말이 하나도 없으면 그 턴은 넘어갑니다.</li>
+    <li>이동 중 말을 다시 누르거나 다른 말을 누르면 선택을 바꿀 수 있습니다.</li>
+  </ul>
+</details>
+
+<script>
+const N = 7;
+const PIECES_PER = 4;
+const NAME = { r: "빨강", b: "파랑" };
+const DIRS = [[-1,0],[1,0],[0,-1],[0,1]]; // up, down, left, right
+
+let S, history, ui;
+
+function initialState() {
+  const pieces = [
+    { p: "r", r: 1, c: 1 }, { p: "r", r: 5, c: 5 },
+    { p: "b", r: 1, c: 5 }, { p: "b", r: 5, c: 1 },
+  ];
+  return {
+    // hW[r][c]: wall below (r,c); vW[r][c]: wall right of (r,c). value: null | "r" | "b"
+    hW: Array.from({ length: N - 1 }, () => Array(N).fill(null)),
+    vW: Array.from({ length: N }, () => Array(N - 1).fill(null)),
+    pieces,
+    placeOrder: ["b", "r", "r", "b"],
+    turn: "b",
+    phase: "place", // place | play | over
+    lastWall: null,
+  };
+}
+
+const clone = s => JSON.parse(JSON.stringify(s));
+
+// is there a wall (or edge) between (r,c) and neighbor in dir d
+function blocked(s, r, c, d) {
+  const [dr, dc] = DIRS[d];
+  const nr = r + dr, nc = c + dc;
+  if (nr < 0 || nr >= N || nc < 0 || nc >= N) return true;
+  if (dr === -1) return !!s.hW[r - 1][c];
+  if (dr === 1) return !!s.hW[r][c];
+  if (dc === -1) return !!s.vW[r][c - 1];
+  return !!s.vW[r][c];
+}
+
+function pieceAt(s, r, c) { return s.pieces.find(q => q.r === r && q.c === c); }
+
+function reachable(s, piece) {
+  const res = [{ r: piece.r, c: piece.c }];
+  const seen = new Set([piece.r * N + piece.c]);
+  let frontier = [{ r: piece.r, c: piece.c }];
+  for (let step = 0; step < 2; step++) {
+    const next = [];
+    for (const { r, c } of frontier) {
+      for (let d = 0; d < 4; d++) {
+        if (blocked(s, r, c, d)) continue;
+        const nr = r + DIRS[d][0], nc = c + DIRS[d][1];
+        if (seen.has(nr * N + nc) || pieceAt(s, nr, nc)) continue;
+        seen.add(nr * N + nc);
+        next.push({ r: nr, c: nc }); res.push({ r: nr, c: nc });
+      }
+    }
+    frontier = next;
+  }
+  return res;
+}
+
+// wall slots around cell that can be built: {t:'h'|'v', r, c}
+function wallSlots(s, r, c) {
+  const out = [];
+  if (r > 0 && !s.hW[r - 1][c]) out.push({ t: "h", r: r - 1, c });
+  if (r < N - 1 && !s.hW[r][c]) out.push({ t: "h", r, c });
+  if (c > 0 && !s.vW[r][c - 1]) out.push({ t: "v", r, c: c - 1 });
+  if (c < N - 1 && !s.vW[r][c]) out.push({ t: "v", r, c });
+  return out;
+}
+
+function legalMoves(s, player) {
+  const moves = [];
+  s.pieces.forEach((q, i) => {
+    if (q.p !== player) return;
+    for (const dst of reachable(s, q)) {
+      // temporarily move to compute wall slots (pieces don't affect walls)
+      for (const w of wallSlots(s, dst.r, dst.c)) moves.push({ i, r: dst.r, c: dst.c, w });
+    }
+  });
+  return moves;
+}
+
+function applyMove(s, m) {
+  const q = s.pieces[m.i];
+  q.r = m.r; q.c = m.c;
+  (m.w.t === "h" ? s.hW : s.vW)[m.w.r][m.w.c] = q.p;
+  s.lastWall = m.w;
+}
+
+function regions(s) {
+  const id = Array.from({ length: N }, () => Array(N).fill(-1));
+  const list = [];
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+    if (id[r][c] !== -1) continue;
+    const reg = { cells: [], owners: new Set() };
+    const stack = [[r, c]]; id[r][c] = list.length;
+    while (stack.length) {
+      const [x, y] = stack.pop();
+      reg.cells.push([x, y]);
+      const pc = pieceAt(s, x, y); if (pc) reg.owners.add(pc.p);
+      for (let d = 0; d < 4; d++) {
+        if (blocked(s, x, y, d)) continue;
+        const nx = x + DIRS[d][0], ny = y + DIRS[d][1];
+        if (id[nx][ny] === -1) { id[nx][ny] = list.length; stack.push([nx, ny]); }
+      }
+    }
+    list.push(reg);
+  }
+  return list;
+}
+
+function scoreOf(s) {
+  const sc = { r: 0, b: 0 }; let done = true;
+  for (const reg of regions(s)) {
+    if (reg.owners.size === 1) sc[[...reg.owners][0]] += reg.cells.length;
+    else if (reg.owners.size > 1) done = false;
+  }
+  return { sc, done };
+}
+
+const other = p => (p === "r" ? "b" : "r");
+
+function endTurn() {
+  const { done } = scoreOf(S);
+  if (done) { S.phase = "over"; return; }
+  let next = other(S.turn);
+  if (!legalMoves(S, next).length) {
+    if (!legalMoves(S, S.turn).length) { S.phase = "over"; return; }
+    ui.msg = `${NAME[next]}은(는) 벽을 세울 수 없어 턴이 넘어갑니다.`;
+    next = S.turn;
+  }
+  S.turn = next;
+}
+
+/* ---------------- AI: 1-ply greedy with Voronoi territory ---------------- */
+function voronoiEval(s, me) {
+  const dist = { r: Array(N * N).fill(99), b: Array(N * N).fill(99) };
+  for (const p of ["r", "b"]) {
+    const q = [];
+    for (const pc of s.pieces) if (pc.p === p) { dist[p][pc.r * N + pc.c] = 0; q.push([pc.r, pc.c]); }
+    for (let h = 0; h < q.length; h++) {
+      const [r, c] = q[h]; const dd = dist[p][r * N + c];
+      for (let d = 0; d < 4; d++) {
+        if (blocked(s, r, c, d)) continue;
+        const k = (r + DIRS[d][0]) * N + (c + DIRS[d][1]);
+        if (dist[p][k] > dd + 1) { dist[p][k] = dd + 1; q.push([r + DIRS[d][0], c + DIRS[d][1]]); }
+      }
+    }
+  }
+  let v = 0;
+  for (let k = 0; k < N * N; k++) {
+    const a = dist[me][k], b = dist[other(me)][k];
+    if (a < b) v += 1; else if (b < a) v -= 1;
+  }
+  const { sc } = scoreOf(s);
+  return v + 0.5 * (sc[me] - sc[other(me)]);
+}
+
+function aiPlace(s, me) {
+  let best = null, bv = -Infinity;
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+    if (pieceAt(s, r, c)) continue;
+    const t = clone(s); t.pieces.push({ p: me, r, c });
+    const v = voronoiEval(t, me) + Math.random() * 0.3;
+    if (v > bv) { bv = v; best = { r, c }; }
+  }
+  return best;
+}
+
+function aiMove(s, me) {
+  let best = null, bv = -Infinity;
+  for (const m of legalMoves(s, me)) {
+    const t = clone(s); applyMove(t, m);
+    let v = voronoiEval(t, me);
+    // light lookahead: assume opponent replies with their best greedy move
+    const opp = legalMoves(t, other(me));
+    if (opp.length && opp.length < 400) {
+      let worst = Infinity;
+      for (const om of opp) {
+        const u = clone(t); applyMove(u, om);
+        worst = Math.min(worst, voronoiEval(u, me));
+        if (worst < bv) break; // prune
+      }
+      v = worst;
+    }
+    v += Math.random() * 0.2;
+    if (v > bv) { bv = v; best = m; }
+  }
+  return best;
+}
+
+function isAI(p) {
+  const m = document.getElementById("mode").value;
+  return (m === "ai-b" && p === "b") || (m === "ai-r" && p === "r");
+}
+
+function maybeAI() {
+  if (S.phase === "over" || !isAI(S.turn)) return;
+  ui.thinking = true; render();
+  setTimeout(() => {
+    pushHistory();
+    if (S.phase === "place") {
+      const pos = aiPlace(S, S.turn);
+      doPlace(pos.r, pos.c);
+    } else {
+      const m = aiMove(S, S.turn);
+      if (m) { applyMove(S, m); endTurn(); }
+    }
+    ui.thinking = false; render(); maybeAI();
+  }, 250);
+}
+
+/* ---------------- interaction ---------------- */
+function pushHistory() { history.push(clone(S)); }
+
+function doPlace(r, c) {
+  S.pieces.push({ p: S.turn, r, c });
+  S.placeOrder.shift();
+  if (S.placeOrder.length) S.turn = S.placeOrder[0];
+  else { S.phase = "play"; S.turn = "r"; }
+}
+
+function onCell(r, c) {
+  if (ui.thinking || S.phase === "over" || isAI(S.turn)) return;
+  ui.msg = "";
+  if (S.phase === "place") {
+    if (pieceAt(S, r, c)) return;
+    pushHistory(); doPlace(r, c); render(); maybeAI(); return;
+  }
+  const pc = pieceAt(S, r, c);
+  const idx = pc ? S.pieces.indexOf(pc) : -1;
+  // moving piece being in a "pending" location: pieces array already updated
+  if (pc && pc.p === S.turn && idx !== ui.sel) {
+    cancelPending();
+    const p2 = pieceAt(S, r, c);
+    ui.sel = S.pieces.indexOf(p2); ui.dest = null;
+    render(); return;
+  }
+  if (ui.sel !== null && idx === ui.sel && ui.dest) { cancelPending(); render(); return; }
+  if (ui.sel !== null) {
+    const q = S.pieces[ui.sel];
+    const origin = ui.origin || { r: q.r, c: q.c };
+    // compute reachability from origin
+    const tmp = clone(S); tmp.pieces[ui.sel].r = origin.r; tmp.pieces[ui.sel].c = origin.c;
+    const ok = reachable(tmp, tmp.pieces[ui.sel]).some(d => d.r === r && d.c === c);
+    if (!ok) return;
+    if (!wallSlots(S, r, c).length) { ui.msg = "그 칸은 벽을 세울 자리가 없습니다."; render(); return; }
+    ui.origin = origin; q.r = r; q.c = c; ui.dest = { r, c };
+    render();
+  }
+}
+
+function cancelPending() {
+  if (ui.sel !== null && ui.origin) {
+    S.pieces[ui.sel].r = ui.origin.r; S.pieces[ui.sel].c = ui.origin.c;
+  }
+  ui.sel = null; ui.dest = null; ui.origin = null;
+}
+
+function onSlot(t, r, c) {
+  if (ui.sel === null || ui.thinking) return;
+  const q = S.pieces[ui.sel];
+  const ok = wallSlots(S, q.r, q.c).some(w => w.t === t && w.r === r && w.c === c);
+  if (!ok) return;
+  // commit: history must have the pre-move state
+  const pre = clone(S); pre.pieces[ui.sel].r = ui.origin ? ui.origin.r : q.r; pre.pieces[ui.sel].c = ui.origin ? ui.origin.c : q.c;
+  history.push(pre);
+  (t === "h" ? S.hW : S.vW)[r][c] = q.p;
+  S.lastWall = { t, r, c };
+  ui.sel = null; ui.dest = null; ui.origin = null;
+  endTurn(); render(); maybeAI();
+}
+
+// a selected piece without moving can also build directly (0-step move)
+function selectedCanBuild() {
+  if (ui.sel === null) return [];
+  const q = S.pieces[ui.sel];
+  return wallSlots(S, q.r, q.c);
+}
+
+/* ---------------- render ---------------- */
+const boardEl = document.getElementById("board");
+function render() {
+  const cell = "var(--cell)", gap = "var(--gap)";
+  const tracks = [];
+  for (let i = 0; i < 2 * N + 1; i++) tracks.push(i % 2 ? cell : gap);
+  boardEl.style.gridTemplateColumns = tracks.join(" ");
+  boardEl.style.gridTemplateRows = tracks.join(" ");
+  boardEl.innerHTML = "";
+
+  const { sc, done } = scoreOf(S);
+  const owner = Array.from({ length: N }, () => Array(N).fill(null));
+  for (const reg of regions(S)) if (reg.owners.size === 1) {
+    const p = [...reg.owners][0]; for (const [r, c] of reg.cells) owner[r][c] = p;
+  }
+
+  let reach = [];
+  if (ui.sel !== null && S.phase === "play") {
+    const tmp = clone(S);
+    if (ui.origin) { tmp.pieces[ui.sel].r = ui.origin.r; tmp.pieces[ui.sel].c = ui.origin.c; }
+    reach = reachable(tmp, tmp.pieces[ui.sel]);
+  }
+  const canSlots = S.phase === "play" ? selectedCanBuild() : [];
+  const humanTurn = !isAI(S.turn) && !ui.thinking && S.phase !== "over";
+
+  for (let gr = 0; gr < 2 * N + 1; gr++) for (let gc = 0; gc < 2 * N + 1; gc++) {
+    const el = document.createElement("div");
+    el.style.gridRow = gr + 1; el.style.gridColumn = gc + 1;
+    const er = gr % 2 === 0, ec = gc % 2 === 0;
+    if (er && ec) { el.className = "post"; }
+    else if (!er && !ec) {
+      const r = (gr - 1) / 2, c = (gc - 1) / 2;
+      el.className = "cell";
+      if (owner[r][c]) el.classList.add("own-" + owner[r][c]);
+      const pc = pieceAt(S, r, c);
+      if (S.phase === "place" && !pc && humanTurn) el.classList.add("reach");
+      if (reach.some(d => d.r === r && d.c === c) && !(pc && S.pieces.indexOf(pc) === ui.sel)) el.classList.add("reach");
+      if (pc) {
+        const pe = document.createElement("div");
+        pe.className = "piece " + pc.p;
+        const i = S.pieces.indexOf(pc);
+        if (humanTurn && S.phase === "play" && pc.p === S.turn && ui.sel === null) pe.classList.add("selectable");
+        if (i === ui.sel) pe.classList.add("selected");
+        el.appendChild(pe);
+      }
+      if (ui.origin && ui.dest && ui.origin.r === r && ui.origin.c === c && !pc) {
+        const g = document.createElement("div"); g.className = "piece ghost " + S.pieces[ui.sel].p; el.appendChild(g);
+      }
+      el.onclick = () => onCell(r, c);
+    } else {
+      el.className = "slot";
+      let t, r, c, edge = false;
+      if (er) { // horizontal slot between rows
+        t = "h"; r = gr / 2 - 1; c = (gc - 1) / 2;
+        if (r < 0 || r >= N - 1) edge = true;
+      } else {
+        t = "v"; r = (gr - 1) / 2; c = gc / 2 - 1;
+        if (c < 0 || c >= N - 1) edge = true;
+      }
+      if (edge) el.classList.add("edge");
+      else {
+        const v = (t === "h" ? S.hW : S.vW)[r][c];
+        if (v) el.classList.add("wall-" + v);
+        if (S.lastWall && S.lastWall.t === t && S.lastWall.r === r && S.lastWall.c === c) el.classList.add("last");
+        if (humanTurn && canSlots.some(w => w.t === t && w.r === r && w.c === c)) {
+          el.classList.add("can"); el.onclick = () => onSlot(t, r, c);
+        }
+      }
+    }
+    boardEl.appendChild(el);
+  }
+
+  document.getElementById("sr").textContent = `빨강 ${sc.r}`;
+  document.getElementById("sb").textContent = `파랑 ${sc.b}`;
+  document.getElementById("sr").classList.toggle("active", S.phase !== "over" && S.turn === "r");
+  document.getElementById("sb").classList.toggle("active", S.phase !== "over" && S.turn === "b");
+
+  let st;
+  if (S.phase === "over") {
+    st = sc.r === sc.b ? `게임 종료 — 무승부 (${sc.r} : ${sc.b})`
+      : `게임 종료 — ${sc.r > sc.b ? "빨강" : "파랑"} 승리! (${sc.r} : ${sc.b})`;
+  } else if (ui.thinking) st = `${NAME[S.turn]} AI 생각 중…`;
+  else if (S.phase === "place") st = `배치 단계: ${NAME[S.turn]} 차례 — 빈 칸에 말을 놓으세요 (남은 배치 ${S.placeOrder.length})`;
+  else if (ui.sel === null) st = `${NAME[S.turn]} 차례 — 움직일 말을 고르세요`;
+  else st = `${NAME[S.turn]} — 이동할 칸(최대 2칸)을 누르거나, 깜빡이는 자리에 벽을 세우세요`;
+  document.getElementById("status").textContent = ui.msg ? `${ui.msg} ${st}` : st;
+}
+
+function reset() {
+  S = initialState(); history = [];
+  ui = { sel: null, dest: null, origin: null, msg: "", thinking: false };
+  render(); maybeAI();
+}
+
+document.getElementById("reset").onclick = reset;
+document.getElementById("mode").onchange = reset;
+document.getElementById("undo").onclick = () => {
+  if (ui.thinking) return;
+  cancelPending();
+  if (!history.length) { render(); return; }
+  S = history.pop();
+  // in AI mode, undo back to a human turn
+  while (isAI(S.turn) && history.length) S = history.pop();
+  ui.msg = ""; render(); maybeAI();
+};
+document.addEventListener("keydown", e => { if (e.key === "Escape") { cancelPending(); render(); } });
+
+reset();
+</script>
+</body>
+</html>
