@@ -15,6 +15,7 @@
     --line: #6b5b3e;
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body {
     margin: 0; font-family: system-ui, -apple-system, "Apple SD Gothic Neo", sans-serif;
     background: var(--bg); color: #222; display: flex; flex-direction: column;
@@ -61,6 +62,12 @@
   .slot.can:hover { background: rgba(0,0,0,.5); }
   .slot.last { box-shadow: 0 0 0 2px #ffd400; }
   @keyframes blink { 50% { background: rgba(0,0,0,.4); } }
+  #online { text-align: center; margin-bottom: 4px; }
+  #online input { font: inherit; font-size: 16px; padding: 6px 10px; width: 9em; border-radius: 8px; border: 1px solid #aaa; text-align: center; letter-spacing: 2px; }
+  #roomText { font-weight: 700; font-size: 18px; letter-spacing: 1px; }
+  #netStatus { font-size: 14px; color: #555; min-height: 1.3em; }
+  #netStatus.ok { color: #1a7f37; } #netStatus.err { color: #c62828; }
+  button:disabled { opacity: .4; cursor: default; }
   details { max-width: 520px; margin-top: 18px; font-size: 14px; line-height: 1.6; background: #fff; padding: 10px 14px; border-radius: 8px; }
   summary { font-weight: 700; cursor: pointer; }
 </style>
@@ -75,9 +82,23 @@
     <option value="pvp">2인 대전</option>
     <option value="ai-b">vs AI (AI가 파랑)</option>
     <option value="ai-r">vs AI (AI가 빨강)</option>
+    <option value="online">온라인 대전 (다른 폰과)</option>
   </select>
   <button id="undo">무르기</button>
   <button id="reset">새 게임</button>
+</div>
+<div id="online" hidden>
+  <div class="bar" id="lobby">
+    <button id="host">방 만들기</button>
+    <span>또는</span>
+    <input id="code" placeholder="방 코드 6자리" maxlength="6" inputmode="numeric" pattern="[0-9]*">
+    <button id="join">참가</button>
+  </div>
+  <div class="bar" id="roomInfo" hidden>
+    <span id="roomText"></span>
+    <button id="share">초대 링크 보내기</button>
+  </div>
+  <div id="netStatus"></div>
 </div>
 <div id="status"></div>
 <div id="board"></div>
@@ -92,9 +113,11 @@
     <li>모든 구역이 한 사람 소유(또는 빈 구역)로 정리되면 게임 종료. <b>영역 칸 수가 많은 쪽이 승리</b>합니다.</li>
     <li>벽을 세울 수 있는 말이 하나도 없으면 그 턴은 넘어갑니다.</li>
     <li>이동 중 말을 다시 누르거나 다른 말을 누르면 선택을 바꿀 수 있습니다.</li>
+    <li><b>온라인 대전:</b> 한 명이 「방 만들기」를 누르고 초대 링크(또는 6자리 코드)를 보내면, 상대가 링크를 열거나 코드를 입력해 참가합니다. 방을 만든 사람이 빨강, 참가한 사람이 파랑입니다.</li>
   </ul>
 </details>
 
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
 const N = 7;
 const PIECES_PER = 4;
@@ -291,6 +314,15 @@ function isAI(p) {
   return (m === "ai-b" && p === "b") || (m === "ai-r" && p === "r");
 }
 
+function isOnline() { return document.getElementById("mode").value === "online"; }
+
+// can the person holding this device act right now?
+function canAct() {
+  if (ui.thinking || S.phase === "over") return false;
+  if (isOnline()) return !!(net.conn && net.conn.open) && S.turn === net.color;
+  return !isAI(S.turn);
+}
+
 function maybeAI() {
   if (S.phase === "over" || !isAI(S.turn)) return;
   ui.thinking = true; render();
@@ -318,11 +350,11 @@ function doPlace(r, c) {
 }
 
 function onCell(r, c) {
-  if (ui.thinking || S.phase === "over" || isAI(S.turn)) return;
+  if (!canAct()) return;
   ui.msg = "";
   if (S.phase === "place") {
     if (pieceAt(S, r, c)) return;
-    pushHistory(); doPlace(r, c); render(); maybeAI(); return;
+    pushHistory(); doPlace(r, c); sendState(); render(); maybeAI(); return;
   }
   const pc = pieceAt(S, r, c);
   const idx = pc ? S.pieces.indexOf(pc) : -1;
@@ -355,7 +387,7 @@ function cancelPending() {
 }
 
 function onSlot(t, r, c) {
-  if (ui.sel === null || ui.thinking) return;
+  if (ui.sel === null || !canAct()) return;
   const q = S.pieces[ui.sel];
   const ok = wallSlots(S, q.r, q.c).some(w => w.t === t && w.r === r && w.c === c);
   if (!ok) return;
@@ -365,7 +397,7 @@ function onSlot(t, r, c) {
   (t === "h" ? S.hW : S.vW)[r][c] = q.p;
   S.lastWall = { t, r, c };
   ui.sel = null; ui.dest = null; ui.origin = null;
-  endTurn(); render(); maybeAI();
+  endTurn(); sendState(); render(); maybeAI();
 }
 
 // a selected piece without moving can also build directly (0-step move)
@@ -398,7 +430,7 @@ function render() {
     reach = reachable(tmp, tmp.pieces[ui.sel]);
   }
   const canSlots = S.phase === "play" ? selectedCanBuild() : [];
-  const humanTurn = !isAI(S.turn) && !ui.thinking && S.phase !== "over";
+  const humanTurn = canAct();
 
   for (let gr = 0; gr < 2 * N + 1; gr++) for (let gc = 0; gc < 2 * N + 1; gc++) {
     const el = document.createElement("div");
@@ -457,20 +489,150 @@ function render() {
     st = sc.r === sc.b ? `게임 종료 — 무승부 (${sc.r} : ${sc.b})`
       : `게임 종료 — ${sc.r > sc.b ? "빨강" : "파랑"} 승리! (${sc.r} : ${sc.b})`;
   } else if (ui.thinking) st = `${NAME[S.turn]} AI 생각 중…`;
+  else if (isOnline() && !(net.conn && net.conn.open)) st = "온라인 대전 — 방을 만들거나 참가하세요";
+  else if (isOnline() && S.turn !== net.color) st = `상대(${NAME[S.turn]}) 차례 — 기다리는 중…`;
   else if (S.phase === "place") st = `배치 단계: ${NAME[S.turn]} 차례 — 빈 칸에 말을 놓으세요 (남은 배치 ${S.placeOrder.length})`;
   else if (ui.sel === null) st = `${NAME[S.turn]} 차례 — 움직일 말을 고르세요`;
   else st = `${NAME[S.turn]} — 이동할 칸(최대 2칸)을 누르거나, 깜빡이는 자리에 벽을 세우세요`;
+  if (isOnline() && net.color) st = `[나: ${NAME[net.color]}] ` + st;
   document.getElementById("status").textContent = ui.msg ? `${ui.msg} ${st}` : st;
+  const online = isOnline();
+  document.getElementById("online").hidden = !online;
+  document.getElementById("undo").disabled = online;
+  document.getElementById("reset").disabled = online && net.color === "b";
 }
 
 function reset() {
   S = initialState(); history = [];
   ui = { sel: null, dest: null, origin: null, msg: "", thinking: false };
-  render(); maybeAI();
+  sendState(); render(); maybeAI();
 }
 
-document.getElementById("reset").onclick = reset;
-document.getElementById("mode").onchange = reset;
+/* ---------------- online (P2P via PeerJS / WebRTC) ---------------- */
+const PEER_PREFIX = "wallbaduk-v1-";
+const net = { peer: null, conn: null, color: null, code: null, role: null };
+
+function setNet(text, cls) {
+  const el = document.getElementById("netStatus");
+  el.textContent = text; el.className = cls || "";
+}
+
+function sendState() {
+  if (isOnline() && net.conn && net.conn.open) net.conn.send({ t: "state", s: S });
+}
+
+function validState(s) {
+  return s && Array.isArray(s.pieces) && Array.isArray(s.hW) && s.hW.length === N - 1 &&
+    Array.isArray(s.vW) && s.vW.length === N && (s.turn === "r" || s.turn === "b") &&
+    ["place", "play", "over"].includes(s.phase);
+}
+
+function wireConn(conn) {
+  if (net.conn && net.conn !== conn) { try { net.conn.close(); } catch (e) {} }
+  net.conn = conn;
+  conn.on("open", () => {
+    setNet(`연결됨! 당신은 ${NAME[net.color]}입니다.`, "ok");
+    document.getElementById("lobby").hidden = true;
+    document.getElementById("roomInfo").hidden = false;
+    document.getElementById("roomText").textContent = "방 코드 " + net.code;
+    if (net.role === "host") sendState(); // host's board is the source of truth on (re)connect
+    render();
+  });
+  conn.on("data", d => {
+    if (!d || d.t !== "state" || !validState(d.s)) return;
+    cancelPending();
+    S = d.s; ui.msg = ""; render();
+  });
+  conn.on("close", () => {
+    if (net.conn !== conn) return;
+    net.conn = null;
+    setNet(net.role === "host" ? "상대 연결이 끊겼습니다. 같은 링크로 다시 들어오면 이어서 둡니다." :
+      "연결이 끊겼습니다. 「참가」를 다시 눌러 주세요.", "err");
+    if (net.role === "guest") { document.getElementById("lobby").hidden = false; document.getElementById("roomInfo").hidden = true; }
+    render();
+  });
+  conn.on("error", e => setNet("연결 오류: " + (e && e.type || e), "err"));
+}
+
+function newPeer(id) {
+  if (typeof Peer === "undefined") { setNet("통신 라이브러리를 불러오지 못했습니다. 인터넷 연결을 확인하세요.", "err"); return null; }
+  if (net.peer) { try { net.peer.destroy(); } catch (e) {} }
+  net.conn = null;
+  const opts = window.WALLBADUK_PEER_OPTS || {}; // optional override, e.g. a self-hosted PeerJS server
+  const peer = id ? new Peer(id, opts) : new Peer(opts);
+  net.peer = peer;
+  return peer;
+}
+
+function hostRoom() {
+  net.code = String(Math.floor(100000 + Math.random() * 900000));
+  net.role = "host"; net.color = "r";
+  const peer = newPeer(PEER_PREFIX + net.code);
+  if (!peer) return;
+  setNet("방 만드는 중…");
+  peer.on("open", () => {
+    S = initialState(); history = []; cancelPending();
+    document.getElementById("lobby").hidden = true;
+    document.getElementById("roomInfo").hidden = false;
+    document.getElementById("roomText").textContent = "방 코드 " + net.code;
+    setNet("상대를 기다리는 중… 초대 링크를 보내세요.");
+    render();
+  });
+  peer.on("connection", conn => wireConn(conn));
+  peer.on("error", e => {
+    if (e.type === "unavailable-id") return hostRoom(); // code collision, pick another
+    setNet("오류: " + e.type, "err");
+  });
+  peer.on("disconnected", () => { try { peer.reconnect(); } catch (e) {} });
+}
+
+function joinRoom(code) {
+  code = String(code || "").trim();
+  if (!/^\d{6}$/.test(code)) { setNet("6자리 방 코드를 입력하세요.", "err"); return; }
+  net.code = code; net.role = "guest"; net.color = "b";
+  const peer = newPeer();
+  if (!peer) return;
+  setNet("방에 접속하는 중…");
+  peer.on("open", () => {
+    const conn = peer.connect(PEER_PREFIX + code, { reliable: true });
+    wireConn(conn);
+    setTimeout(() => { if (net.conn === conn && !conn.open) setNet("접속이 안 됩니다. 코드를 확인하거나 방장이 화면을 켜 두었는지 확인하세요.", "err"); }, 12000);
+  });
+  peer.on("error", e => {
+    setNet(e.type === "peer-unavailable" ? "해당 코드의 방이 없습니다." : "오류: " + e.type, "err");
+  });
+  peer.on("disconnected", () => { try { peer.reconnect(); } catch (e) {} });
+}
+
+function leaveOnline() {
+  if (net.peer) { try { net.peer.destroy(); } catch (e) {} }
+  Object.assign(net, { peer: null, conn: null, color: null, code: null, role: null });
+  document.getElementById("lobby").hidden = false;
+  document.getElementById("roomInfo").hidden = true;
+  setNet("");
+}
+
+function inviteUrl() {
+  const u = new URL(location.href); u.search = "?room=" + net.code; u.hash = "";
+  return u.toString();
+}
+
+document.getElementById("host").onclick = hostRoom;
+document.getElementById("join").onclick = () => joinRoom(document.getElementById("code").value);
+document.getElementById("share").onclick = async () => {
+  const url = inviteUrl();
+  try {
+    if (navigator.share) { await navigator.share({ title: "벽바둑 한 판 해요", text: `방 코드 ${net.code}`, url }); return; }
+  } catch (e) { if (e.name === "AbortError") return; }
+  try { await navigator.clipboard.writeText(url); setNet("초대 링크를 복사했습니다. 메신저에 붙여넣어 보내세요."); }
+  catch (e) { prompt("이 링크를 복사해서 보내세요", url); }
+};
+
+document.getElementById("reset").onclick = () => {
+  if (isOnline() && net.color === "b") return;
+  reset();
+};
+document.getElementById("mode").onchange = () => { leaveOnline(); reset(); };
 document.getElementById("undo").onclick = () => {
   if (ui.thinking) return;
   cancelPending();
@@ -483,6 +645,13 @@ document.getElementById("undo").onclick = () => {
 document.addEventListener("keydown", e => { if (e.key === "Escape") { cancelPending(); render(); } });
 
 reset();
+const roomParam = new URLSearchParams(location.search).get("room");
+if (roomParam) {
+  document.getElementById("mode").value = "online";
+  document.getElementById("code").value = roomParam;
+  render();
+  joinRoom(roomParam);
+}
 </script>
 </body>
 </html>
